@@ -87,7 +87,7 @@ impl VoiceClient {
             .with_grants(VideoGrants {
                 room_join: true,
                 can_publish: true,
-                can_publish_data: false,
+                can_publish_data: true,
                 can_publish_sources: allowed_sources
                     .into_iter()
                     .map(ToString::to_string)
