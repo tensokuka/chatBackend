@@ -7,17 +7,17 @@ use fred::{
     types::{ReconnectPolicy, RedisConfig},
 };
 use futures::{
+    FutureExt, SinkExt, StreamExt, TryStreamExt,
     channel::oneshot,
     join, pin_mut, select,
     stream::{SplitSink, SplitStream},
-    FutureExt, SinkExt, StreamExt, TryStreamExt,
 };
-use redis_kiss::{get_connection, AsyncCommands, PayloadType, REDIS_PAYLOAD_TYPE, REDIS_URI};
+use redis_kiss::{AsyncCommands, PayloadType, REDIS_PAYLOAD_TYPE, REDIS_URI, get_connection};
 use revolt_config::report_internal_error;
 use revolt_database::{
+    Database, User, UserHint,
     events::{client::EventV1, server::ClientMessage},
     iso8601_timestamp::Timestamp,
-    Database, User, UserHint,
 };
 use revolt_presence::{create_session, delete_session};
 
@@ -439,6 +439,9 @@ async fn worker_with_kill_signal(
     kill_signal_s.send(()).await.ok();
 }
 
+/// Clients ping every 30 seconds, so this allows two to go missing
+const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+
 #[allow(clippy::too_many_arguments)]
 async fn worker(
     addr: SocketAddr,
@@ -453,7 +456,7 @@ async fn worker(
     db: &Database,
 ) {
     loop {
-        let t1 = read.try_next().fuse();
+        let t1 = tokio::time::timeout(IDLE_TIMEOUT, read.try_next()).fuse();
         let t2 = kill_signal_r.recv().fuse();
 
         pin_mut!(t1, t2);
@@ -463,6 +466,14 @@ async fn worker(
                 return;
             },
             result = t1 => {
+                // A client that vanished without closing (phone killed or
+                // out of signal) would otherwise keep the user "online" and
+                // block their push notifications indefinitely
+                let Ok(result) = result else {
+                    info!("Closing {addr:?} for {user_id}: nothing received for {IDLE_TIMEOUT:?}");
+                    return;
+                };
+
                 let msg = match result {
                     Ok(Some(msg)) => msg,
                     Ok(None) => {

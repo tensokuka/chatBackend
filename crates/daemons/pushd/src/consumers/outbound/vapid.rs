@@ -2,18 +2,29 @@ use std::{collections::HashMap, sync::Arc};
 
 use crate::utils::Consumer;
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, anyhow, bail};
 use async_trait::async_trait;
 use base64::{
-    engine::{self},
     Engine as _,
+    engine::{self},
 };
-use lapin::{message::Delivery, Channel as AMQPChannel, Connection};
-use revolt_database::{events::rabbit::*, util::format_display_name, Database};
+use lapin::{Channel as AMQPChannel, Connection, message::Delivery};
+use log::{info, warn};
+use revolt_database::{Database, events::rabbit::*, util::format_display_name};
 use web_push::{
-    ContentEncoding, IsahcWebPushClient, SubscriptionInfo, SubscriptionKeys, VapidSignatureBuilder,
-    WebPushClient, WebPushError, WebPushMessageBuilder,
+    ContentEncoding, IsahcWebPushClient, SubscriptionInfo, SubscriptionKeys, Urgency,
+    VapidSignatureBuilder, WebPushClient, WebPushError, WebPushMessageBuilder,
 };
+
+/// Host of a push endpoint, for logs (the full endpoint is a credential)
+fn url_host(endpoint: &str) -> &str {
+    endpoint
+        .split_once("://")
+        .map_or(endpoint, |(_, rest)| rest)
+        .split('/')
+        .next()
+        .unwrap_or_default()
+}
 
 #[derive(Clone)]
 #[allow(unused)]
@@ -27,11 +38,7 @@ pub struct VapidOutboundConsumer {
 
 #[async_trait]
 impl Consumer for VapidOutboundConsumer {
-    async fn create(
-        db: Database,
-        connection: Arc<Connection>,
-        channel: Arc<AMQPChannel>,
-    ) -> Self {
+    async fn create(db: Database, connection: Arc<Connection>, channel: Arc<AMQPChannel>) -> Self {
         let config = revolt_config::config().await;
 
         if config.pushd.vapid.private_key.is_empty() || config.pushd.vapid.public_key.is_empty() {
@@ -143,21 +150,44 @@ impl Consumer for VapidOutboundConsumer {
             }
         };
 
-        let signature = VapidSignatureBuilder::from_pem(
+        // Apple's push service expects a `sub` contact claim; others accept it
+        let config = revolt_config::config().await;
+        let mut signature = VapidSignatureBuilder::from_pem(
             std::io::Cursor::new(self.pkey.as_ref()),
             &subscription,
-        )?
-        .build()?;
+        )?;
+        signature.add_claim("sub", config.hosts.app.clone());
+        let signature = signature.build()?;
 
         let mut builder = WebPushMessageBuilder::new(&subscription);
         builder.set_vapid_signature(signature);
 
-        builder.set_payload(ContentEncoding::AesGcm, payload_body.as_bytes());
+        // aes128gcm (RFC 8291) is the standard every current browser supports;
+        // the legacy aesgcm draft can be accepted by a push service and then
+        // fail to decrypt on the device, which nothing here would notice
+        builder.set_payload(ContentEncoding::Aes128Gcm, payload_body.as_bytes());
+        builder.set_urgency(Urgency::High);
 
         let msg = builder.build()?;
 
+        let host = url_host(&subscription.endpoint);
         match self.client.send(msg).await {
-            Err(WebPushError::Unauthorized) => {
+            Ok(()) => {
+                info!(
+                    "Web push accepted by {host} for session {}",
+                    payload.session_id
+                );
+            }
+            // The subscription is no longer valid, so stop sending to it
+            Err(
+                err @ (WebPushError::Unauthorized
+                | WebPushError::EndpointNotValid
+                | WebPushError::EndpointNotFound),
+            ) => {
+                warn!(
+                    "Web push rejected by {host} for session {} ({err}), removing subscription",
+                    payload.session_id
+                );
                 if let Err(err) = self
                     .db
                     .remove_push_subscription_by_session_id(&payload.session_id)
@@ -166,11 +196,32 @@ impl Consumer for VapidOutboundConsumer {
                     revolt_config::capture_error(&err);
                 }
             }
-            res => {
-                res?;
+            Err(err) => {
+                bail!(
+                    "Web push to {host} for session {} failed: {err:?}",
+                    payload.session_id
+                );
             }
         };
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::url_host;
+
+    #[test]
+    fn url_host_keeps_only_the_host() {
+        assert_eq!(
+            url_host("https://web.push.apple.com/QBMbCXS8d-L8bhiMvDCn02y"),
+            "web.push.apple.com"
+        );
+        assert_eq!(
+            url_host("https://fcm.googleapis.com/fcm/send/abc:def"),
+            "fcm.googleapis.com"
+        );
+        assert_eq!(url_host("no-scheme/path"), "no-scheme");
     }
 }
