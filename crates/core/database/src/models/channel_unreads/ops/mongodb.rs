@@ -138,6 +138,33 @@ impl AbstractChannelUnreads for MongoDb {
             .map_err(|_| create_database_error!("update_many", COL))
     }
 
+    /// Remove deleted messages from everyone's mentions in a channel.
+    async fn remove_mentions(&self, channel_id: &str, message_ids: &[String]) -> Result<()> {
+        if message_ids.is_empty() {
+            return Ok(());
+        }
+
+        self.col::<Document>(COL)
+            .update_many(
+                doc! {
+                    "_id.channel": channel_id,
+                    "mentions": {
+                        "$in": message_ids
+                    }
+                },
+                doc! {
+                    "$pull": {
+                        "mentions": {
+                            "$in": message_ids
+                        }
+                    }
+                },
+            )
+            .await
+            .map(|_| ())
+            .map_err(|_| create_database_error!("update_many", COL))
+    }
+
     /// Fetch all channel unreads for a user.
     async fn fetch_unreads(&self, user_id: &str) -> Result<Vec<ChannelUnread>> {
         query!(

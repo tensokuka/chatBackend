@@ -35,6 +35,9 @@ pub trait AbstractChannelUnreads: Sync + Send {
         message_ids: &[String],
     ) -> Result<()>;
 
+    /// Remove deleted messages from everyone's mentions in a channel.
+    async fn remove_mentions(&self, channel_id: &str, message_ids: &[String]) -> Result<()>;
+
     /// Fetch all unreads with mentions for a user.
     async fn fetch_unread_mentions(&self, user_id: &str) -> Result<Vec<ChannelUnread>>;
 
