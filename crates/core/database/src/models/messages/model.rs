@@ -1064,6 +1064,8 @@ impl Message {
         }
 
         db.delete_message(&self.id).await?;
+        db.remove_mentions(&self.channel, std::slice::from_ref(&self.id))
+            .await?;
 
         if let Ok(mut channel) = db.fetch_channel(&self.channel).await {
             match &channel {
@@ -1121,6 +1123,7 @@ impl Message {
             .collect::<Vec<String>>();
 
         db.delete_messages(channel, &valid_ids).await?;
+        db.remove_mentions(channel, &valid_ids).await?;
         EventV1::BulkMessageDelete {
             channel: channel.to_string(),
             ids: valid_ids,
@@ -1143,6 +1146,7 @@ impl Message {
 
         for (channel_id, message_ids) in deleted_groups {
             if !message_ids.is_empty() {
+                db.remove_mentions(&channel_id, &message_ids).await?;
                 EventV1::BulkMessageDelete {
                     channel: channel_id.clone(),
                     ids: message_ids,

@@ -110,6 +110,20 @@ impl AbstractChannelUnreads for ReferenceDb {
         Ok(())
     }
 
+    /// Remove deleted messages from everyone's mentions in a channel.
+    async fn remove_mentions(&self, channel_id: &str, message_ids: &[String]) -> Result<()> {
+        let mut unreads = self.channel_unreads.lock().await;
+        for unread in unreads.values_mut() {
+            if unread.id.channel == channel_id {
+                if let Some(mentions) = &mut unread.mentions {
+                    mentions.retain(|id| !message_ids.contains(id));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     async fn fetch_unread_mentions(&self, user_id: &str) -> Result<Vec<ChannelUnread>> {
         let unreads = self.channel_unreads.lock().await;
         Ok(unreads
