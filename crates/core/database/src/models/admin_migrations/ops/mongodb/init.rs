@@ -204,6 +204,20 @@ pub async fn create_database(db: &MongoDb) {
     .expect("Failed to create channel_unreads index.");
 
     db.run_command(doc! {
+        "createIndexes": "notification_prefs",
+        "indexes": [
+            {
+                "key": {
+                    "all": 1_i32,
+                },
+                "name": "all"
+            }
+        ]
+    })
+    .await
+    .expect("Failed to create notification_prefs index.");
+
+    db.run_command(doc! {
         "createIndexes": "server_members",
         "indexes": [
             {

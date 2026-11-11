@@ -13,6 +13,7 @@ mod file_hashes;
 mod files;
 mod messages;
 mod mfa_tickets;
+mod notification_prefs;
 mod policy_changes;
 mod ratelimit_events;
 mod safety_reports;
@@ -39,6 +40,7 @@ pub use file_hashes::*;
 pub use files::*;
 pub use messages::*;
 pub use mfa_tickets::*;
+pub use notification_prefs::*;
 pub use policy_changes::*;
 pub use ratelimit_events::*;
 pub use safety_reports::*;
@@ -69,6 +71,7 @@ pub trait AbstractDatabase:
     + file_hashes::AbstractAttachmentHashes
     + files::AbstractAttachments
     + messages::AbstractMessages
+    + notification_prefs::AbstractNotificationPrefs
     + policy_changes::AbstractPolicyChange
     + ratelimit_events::AbstractRatelimitEvents
     + safety_reports::AbstractReport

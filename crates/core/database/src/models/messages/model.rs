@@ -705,14 +705,14 @@ impl Message {
         )
         .await?;
 
-        let is_dm_or_group = matches!(
+        // Every message may notify someone: the push service decides who,
+        // from each user's notification settings, status and activity
+        let can_notify = matches!(
             channel,
-            Channel::DirectMessage { .. } | Channel::Group { .. }
+            Channel::DirectMessage { .. } | Channel::Group { .. } | Channel::TextChannel { .. }
         );
 
-        if !self.has_suppressed_notifications()
-            && (is_dm_or_group || self.mentions.is_some() || self.contains_mass_push_mention())
-        {
+        if !self.has_suppressed_notifications() && can_notify {
             // send Push notifications
             #[cfg(feature = "tasks")]
             tasks::ack::queue_message(

@@ -1,16 +1,20 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     hash::RandomState,
     sync::Arc,
 };
 
-use crate::utils::{render_notification_content, Consumer};
+use crate::utils::{Consumer, push_context, render_notification_content, send_message_push};
 use anyhow::Result;
 use async_trait::async_trait;
-use lapin::{message::Delivery, Channel, Connection};
+use lapin::{Channel, Connection, message::Delivery};
 use revolt_database::{
-    events::rabbit::*, util::bulk_permissions::BulkDatabasePermissionQuery, Database, Member,
-    MessageFlagsValue,
+    Database, Member, MessageFlagsValue,
+    events::rabbit::*,
+    util::{
+        bulk_permissions::BulkDatabasePermissionQuery,
+        push_filter::{PushCandidate, filter_push_recipients},
+    },
 };
 use revolt_models::v0::{MessageFlags, PushNotification};
 use revolt_result::ToRevoltError;
@@ -24,59 +28,34 @@ pub struct MassMessageConsumer {
 }
 
 impl MassMessageConsumer {
-    async fn fire_notification_for_users(
+    /// Push to the users mentioned by @everyone or a role who want it
+    async fn notify(
         &self,
         push: &PushNotification,
-        users: &[String],
+        users: impl Iterator<Item = &String>,
+        skip: &HashSet<String>,
     ) -> Result<()> {
-        if let Ok(sessions) = self
-            .db
-            .fetch_sessions_with_subscription(users)
-            .await
-        {
-            let config = revolt_config::config().await;
-            for session in sessions {
-                if let Some(sub) = session.subscription {
-                    let mut sendable = PayloadToService {
-                        notification: PayloadKind::MessageNotification(push.clone()),
-                        token: sub.auth,
-                        user_id: session.user_id,
-                        session_id: session.id,
-                        extras: HashMap::new(),
-                    };
+        let Some(context) = push_context(push) else {
+            return Ok(());
+        };
 
-                    let routing_key = match sub.endpoint.as_str() {
-                        "apn" => &config.pushd.apn.queue,
-                        "fcm" => &config.pushd.fcm.queue,
-                        endpoint => {
-                            sendable.extras.insert("p256dh".to_string(), sub.p256dh);
-                            sendable
-                                .extras
-                                .insert("endpoint".to_string(), endpoint.to_string());
+        let candidates: Vec<PushCandidate> = users
+            .filter(|id| !skip.contains(*id))
+            .map(|id| PushCandidate {
+                user_id: id.clone(),
+                mentioned: true,
+            })
+            .collect();
 
-                            &config.pushd.vapid.queue
-                        }
-                    };
-
-                    let payload = serde_json::to_string(&sendable)?;
-
-                    self.publish_message(payload.as_bytes(), &config.pushd.exchange, routing_key)
-                        .await?;
-                }
-            }
-        }
-
-        Ok(())
+        let targets = filter_push_recipients(&self.db, &context, &candidates).await?;
+        debug!("targets: {:?}", targets);
+        send_message_push(self, &self.db, push, &targets).await
     }
 }
 
 #[async_trait]
 impl Consumer for MassMessageConsumer {
-    async fn create(
-        db: Database,
-        connection: Arc<Connection>,
-        channel: Arc<Channel>,
-    ) -> Self {
+    async fn create(db: Database, connection: Arc<Connection>, channel: Arc<Channel>) -> Self {
         Self {
             db,
             connection,
@@ -126,6 +105,15 @@ impl Consumer for MassMessageConsumer {
                     HashSet::new()
                 };
 
+            // Users mentioned by name, and users who chose All for the
+            // channel, are notified by the message consumer
+            let mut skip = existing_mentions.clone();
+            skip.extend(
+                self.db
+                    .fetch_users_notified_of_all(push.channel.id(), Some(&payload.server_id))
+                    .await?,
+            );
+
             // KNOWN QUIRK: if you mention @online and role(s), the offline members with the role(s) wont get pinged
             if let Some(ref query) = query {
                 let flags = MessageFlagsValue(push.message.flags);
@@ -161,23 +149,7 @@ impl Consumer for MassMessageConsumer {
                             revolt_config::capture_error(&err);
                         }
 
-                        // ignore anyone in this list
-                        let online_users = revolt_presence::filter_online(&userids).await;
-                        let target_users: Vec<String> = userids
-                            .iter()
-                            .filter(|id| {
-                                !online_users.contains(*id) && !existing_mentions.contains(*id)
-                            })
-                            .cloned()
-                            .collect();
-
-                        debug!(
-                            "Userids after filter: {:?} (online: {:?}",
-                            target_users, online_users
-                        );
-
-                        self.fire_notification_for_users(&push, &target_users)
-                            .await?;
+                        self.notify(&push, userids.iter(), &skip).await?;
 
                         if exhausted {
                             break;
@@ -210,29 +182,12 @@ impl Consumer for MassMessageConsumer {
                             .members_can_see_channel()
                             .await
                             .iter()
-                            .filter_map(|(uid, viewable)| {
-                                if *viewable && !existing_mentions.contains(uid) {
-                                    Some(uid.clone())
-                                } else {
-                                    None
-                                }
-                            })
+                            .filter_map(|(uid, viewable)| viewable.then(|| uid.clone()))
                             .collect();
 
                         debug!("viewing members: {:?}", viewing_members);
 
-                        let online = revolt_presence::filter_online(&viewing_members).await;
-                        debug!("online: {:?}", online);
-
-                        let targets: Vec<String> = viewing_members
-                            .iter()
-                            .filter(|m| !online.contains(*m))
-                            .cloned()
-                            .collect();
-
-                        debug!("targets: {:?}", targets);
-
-                        self.fire_notification_for_users(&push, &targets).await?;
+                        self.notify(&push, viewing_members.iter(), &skip).await?;
                     }
                 }
             }
