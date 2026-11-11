@@ -26,7 +26,7 @@ struct MigrationInfo {
     revision: i32,
 }
 
-pub const LATEST_REVISION: i32 = 55; // MUST BE +1 to last migration
+pub const LATEST_REVISION: i32 = 56; // MUST BE +1 to last migration
 
 pub async fn migrate_database(db: &MongoDb) {
     let migrations = db.col::<Document>("migrations");
@@ -1600,6 +1600,55 @@ pub async fn run_migrations(db: &MongoDb, revision: i32) -> i32 {
             .await
             .expect("Failed to update default_permissions");
     };
+
+    if revision <= 55 {
+        info!("Running migration [revision 55 / 10-11-2026]: Copy notification settings for push");
+
+        db.db()
+            .run_command(doc! {
+                "createIndexes": "notification_prefs",
+                "indexes": [
+                    {
+                        "key": {
+                            "all": 1_i32
+                        },
+                        "name": "all"
+                    }
+                ]
+            })
+            .await
+            .expect("Failed to create notification_prefs index");
+
+        let mut settings = db
+            .db()
+            .collection::<Document>("user_settings")
+            .find(doc! { "notifications": { "$exists": true } })
+            .projection(doc! { "notifications": 1 })
+            .await
+            .expect("Failed to fetch user settings");
+
+        let mut copied = 0;
+        while let Some(Ok(document)) = settings.next().await {
+            // Stored as [timestamp, json]
+            let (Ok(user_id), Ok(value)) =
+                (document.get_str("_id"), document.get_array("notifications"))
+            else {
+                continue;
+            };
+
+            if let Some(Bson::String(json)) = value.get(1) {
+                crate::AbstractNotificationPrefs::set_notification_prefs(
+                    db,
+                    &crate::NotificationPrefs::from_settings(user_id, json),
+                )
+                .await
+                .expect("Failed to save notification preferences");
+                copied += 1;
+            }
+        }
+
+        info!("Copied notification settings for {copied} users");
+    }
 
     // Reminder to update LATEST_REVISION when adding new migrations.
     LATEST_REVISION.max(revision)

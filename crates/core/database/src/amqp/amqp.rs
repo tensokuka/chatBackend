@@ -1,7 +1,4 @@
-use std::{
-    collections::HashSet,
-    sync::{Arc, OnceLock},
-};
+use std::sync::{Arc, OnceLock};
 
 use crate::User;
 use crate::events::{client::EventV1, rabbit::*};
@@ -13,7 +10,6 @@ use lapin::{
 };
 use revolt_config::config;
 use revolt_models::v0::PushNotification;
-use revolt_presence::filter_online;
 use revolt_result::Result;
 
 use serde_json::to_string;
@@ -201,17 +197,9 @@ impl AMQP {
         recipients: Vec<String>,
         payload: PushNotification,
     ) -> Result<(), AMQPError> {
-        if recipients.is_empty() {
-            return Ok(());
-        }
-
         let config = revolt_config::config().await;
 
-        let online_ids = filter_online(&recipients).await;
-        let recipients = (&recipients.into_iter().collect::<HashSet<String>>() - &online_ids)
-            .into_iter()
-            .collect::<Vec<String>>();
-
+        // pushd decides who is actually notified
         let payload = MessageSentPayload {
             notification: payload,
             users: recipients,

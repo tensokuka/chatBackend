@@ -63,6 +63,7 @@ async fn delete_session_internal(user_id: &str, session_id: u32, skip_region: bo
     if let Ok(mut conn) = get_connection().await {
         // Remove the session
         __remove_from_set_u32(&mut conn, &format!("sessions:{user_id}"), session_id).await;
+        __remove_from_set_u32(&mut conn, &format!("idle_sessions:{user_id}"), session_id).await;
 
         // Remove from the region
         if !skip_region {
@@ -82,6 +83,50 @@ async fn delete_session_internal(user_id: &str, session_id: u32, skip_region: bo
         // Fail through
         false
     }
+}
+
+/// Record whether the device behind a session is in use. Sessions start out
+/// active, so clients that never report this count as in use while connected.
+pub async fn set_session_active(user_id: &str, session_id: u32, active: bool) {
+    if let Ok(mut conn) = get_connection().await {
+        let key = format!("idle_sessions:{user_id}");
+        if active {
+            __remove_from_set_u32(&mut conn, &key, session_id).await;
+        } else if conn
+            .sismember::<_, _, bool>(format!("sessions:{user_id}"), session_id)
+            .await
+            .unwrap_or(false)
+        {
+            // Only for live sessions, so a late report can't leave a stale entry
+            __add_to_set_u32(&mut conn, &key, session_id).await;
+        }
+    }
+}
+
+/// Of the given users, those with at least one session whose device is in use
+pub async fn filter_active(user_ids: &'_ [String]) -> HashSet<String> {
+    let mut set = HashSet::new();
+    if user_ids.is_empty() {
+        return set;
+    }
+
+    if let Ok(mut conn) = get_connection().await {
+        for user_id in user_ids {
+            let active: Vec<u32> = conn
+                .sdiff(&[
+                    format!("sessions:{user_id}"),
+                    format!("idle_sessions:{user_id}"),
+                ])
+                .await
+                .unwrap_or_default();
+
+            if !active.is_empty() {
+                set.insert(user_id.to_string());
+            }
+        }
+    }
+
+    set
 }
 
 /// Check whether a given user ID is online
@@ -194,7 +239,10 @@ pub async fn clear_region(region_id: Option<&str>) {
 
 #[cfg(test)]
 mod tests {
-    use crate::{clear_region, create_session, delete_session, filter_online, is_online};
+    use crate::{
+        clear_region, create_session, delete_session, filter_active, filter_online, is_online,
+        set_session_active,
+    };
     use rand::Rng;
 
     #[tokio::test]
@@ -234,6 +282,17 @@ mod tests {
         assert_eq!(user_ids.len(), 2);
         assert!(user_ids.contains(&user_id));
         assert!(user_ids.contains(&other_id));
+
+        // Sessions count as active until reported idle
+        let active = filter_active(&[user_id.to_string(), other_id.to_string()]).await;
+        assert_eq!(active.len(), 2);
+
+        set_session_active(&user_id, session_id, false).await;
+        assert!(filter_active(&[user_id.to_string()]).await.contains(&user_id));
+        set_session_active(&user_id, second_session_id, false).await;
+        assert!(filter_active(&[user_id.to_string()]).await.is_empty());
+        set_session_active(&user_id, second_session_id, true).await;
+        assert!(filter_active(&[user_id.to_string()]).await.contains(&user_id));
 
         // Remove sessions
         delete_session(&user_id, session_id).await;

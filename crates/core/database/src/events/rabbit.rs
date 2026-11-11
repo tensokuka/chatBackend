@@ -8,6 +8,8 @@ use crate::User;
 #[derive(Serialize, Deserialize)]
 pub struct MessageSentPayload {
     pub notification: PushNotification,
+    /// DM and group members, or the users mentioned by name; pushd adds
+    /// anyone who chose All for the channel and filters the lot
     pub users: Vec<String>,
 }
 

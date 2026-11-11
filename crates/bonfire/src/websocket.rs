@@ -19,7 +19,7 @@ use revolt_database::{
     events::{client::EventV1, server::ClientMessage},
     iso8601_timestamp::Timestamp,
 };
-use revolt_presence::{create_session, delete_session};
+use revolt_presence::{create_session, delete_session, set_session_active};
 
 use revolt_result::create_error;
 use sentry::Level;
@@ -183,6 +183,7 @@ pub async fn client(db: &'static Database, stream: TcpStream, addr: SocketAddr) 
             subscribed,
             active_servers,
             user_id.clone(),
+            session_id,
             &config,
             topic_signal_s,
             kill_signal_2_r,
@@ -415,6 +416,7 @@ async fn worker_with_kill_signal(
     subscribed: Arc<RwLock<HashSet<String>>>,
     active_servers: Arc<Mutex<lru_time_cache::LruCache<String, ()>>>,
     user_id: String,
+    presence_session: u32,
     config: &ProtocolConfiguration,
     topic_signal_s: async_channel::Sender<()>,
     kill_signal_r: async_channel::Receiver<()>,
@@ -428,6 +430,7 @@ async fn worker_with_kill_signal(
         subscribed,
         active_servers,
         user_id,
+        presence_session,
         config,
         topic_signal_s,
         kill_signal_r,
@@ -448,6 +451,7 @@ async fn worker(
     subscribed: Arc<RwLock<HashSet<String>>>,
     active_servers: Arc<Mutex<lru_time_cache::LruCache<String, ()>>>,
     user_id: String,
+    presence_session: u32,
     config: &ProtocolConfiguration,
     topic_signal_s: async_channel::Sender<()>,
     kill_signal_r: async_channel::Receiver<()>,
@@ -533,6 +537,9 @@ async fn worker(
                                 topic_signal_s.send(()).await.ok();
                             }
                         }
+                    }
+                    ClientMessage::Activity { active } => {
+                        set_session_active(&user_id, presence_session, active).await;
                     }
                     ClientMessage::Ping { data, responded } => {
                         if responded.is_none() {

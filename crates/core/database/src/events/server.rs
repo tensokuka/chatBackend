@@ -10,4 +10,8 @@ pub enum ClientMessage {
     EndTyping { channel: String },
     Subscribe { server_id: String },
     Ping { data: Ping, responded: Option<()> },
+    /// Whether the device is in use, so push notifications can go to the
+    /// user's other devices while it isn't. Connections count as in use
+    /// until they say otherwise.
+    Activity { active: bool },
 }

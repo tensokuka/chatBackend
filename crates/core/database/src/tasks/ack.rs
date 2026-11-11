@@ -155,10 +155,9 @@ pub async fn handle_ack_event(
             let mut mass_mentions = vec![];
 
             for (push, message, recipients, silenced) in messages {
-                if *silenced
-                    || push.is_none()
-                    || (recipients.is_empty() && !message.contains_mass_push_mention())
-                {
+                // Recipients can be empty: users who chose All for the
+                // channel are found by the push service
+                if *silenced || push.is_none() {
                     debug!(
                         "Rejecting push: silenced: {}, recipient count: {}, push exists: {:?}",
                         *silenced,

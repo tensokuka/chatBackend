@@ -217,6 +217,10 @@ auto_derived!(
         pub message: Message,
         /// The channel object itself, for clients to process
         pub channel: Channel,
+        /// Replace the previous notification from this channel without
+        /// sound or vibration, as one was just shown for it
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        pub quiet: bool,
     }
 
     /// Representation of a text embed before it is sent.
@@ -521,6 +525,7 @@ impl PushNotification {
             url: format!("{}/channel/{}/{}", config.hosts.app, channel.id(), msg.id),
             message: msg,
             channel,
+            quiet: false,
         }
     }
 }
